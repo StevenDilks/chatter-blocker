@@ -7,6 +7,7 @@ mod tray;
 
 use anyhow::{anyhow, Result};
 use filter::{Decision, Filter};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -17,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static FILTER: OnceLock<Mutex<Filter>> = OnceLock::new();
+static DEBUG_LOG: AtomicBool = AtomicBool::new(false);
 
 fn filter() -> &'static Mutex<Filter> {
     FILTER.get().expect("filter not initialized before hook fired")
@@ -47,12 +49,24 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     };
 
     match decision {
-        Decision::Suppress => LRESULT(1),
+        Decision::Suppress => {
+            if DEBUG_LOG.load(Ordering::Relaxed) {
+                let kind = match wparam.0 as u32 {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => "down",
+                    WM_KEYUP | WM_SYSKEYUP => "up",
+                    _ => "?",
+                };
+                println!("suppress {kind} vk=0x{vk:02X} t={time}");
+            }
+            LRESULT(1)
+        }
         Decision::Pass => unsafe { CallNextHookEx(None, code, wparam, lparam) },
     }
 }
 
 fn main() -> Result<()> {
+    DEBUG_LOG.store(std::env::var_os("CHATTER_LOG").is_some(), Ordering::Relaxed);
+
     let cfg = config::Config::load()?;
     FILTER
         .set(Mutex::new(Filter::new(cfg)))

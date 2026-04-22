@@ -62,32 +62,14 @@ impl Filter {
     }
 
     pub fn on_key_up(&mut self, vk: u32, time_ms: u32) -> Decision {
-        let threshold = self.cfg.threshold(vk);
+        // UPs always pass. Suppressing them would cause stuck modifiers (Ctrl,
+        // Shift, Alt) at any non-trivial threshold since held time is usually
+        // shorter than the debounce window. A mid-hold bounce still briefly
+        // looks like a release to the app, but that's cheaper than stuck keys.
         let state = self.state.entry(vk).or_default();
-
-        // Suppressing a sub-threshold UP while held keeps the app's view consistent
-        // through mid-hold bounces. Set per-key threshold low (or 0) for keys used
-        // in tight-timing contexts like games.
-        let suppress = if state.is_held {
-            let gap = time_ms.saturating_sub(state.last_down_ms);
-            if gap < threshold {
-                true
-            } else {
-                state.last_up_ms = time_ms;
-                state.is_held = false;
-                false
-            }
-        } else {
-            state.last_up_ms = time_ms;
-            false
-        };
-
-        if suppress {
-            *self.suppressed_count.entry(vk).or_insert(0) += 1;
-            Decision::Suppress
-        } else {
-            Decision::Pass
-        }
+        state.last_up_ms = time_ms;
+        state.is_held = false;
+        Decision::Pass
     }
 
     pub fn suppressed(&self, vk: u32) -> u64 {
@@ -142,13 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn chatter_during_hold_suppressed() {
+    fn bounce_back_down_after_spurious_up_suppressed() {
+        // Mid-hold bounce: the spurious UP leaks through (UPs always pass),
+        // but the bounce-back DOWN that would produce a duplicate character
+        // is blocked.
         let mut f = filter(30);
         f.on_key_down(A, 100);
-        assert!(matches!(f.on_key_up(A, 105), Decision::Suppress));
+        assert!(matches!(f.on_key_up(A, 105), Decision::Pass));
         assert!(matches!(f.on_key_down(A, 110), Decision::Suppress));
         assert!(matches!(f.on_key_up(A, 600), Decision::Pass));
-        assert_eq!(f.suppressed(A), 2);
+        assert_eq!(f.suppressed(A), 1);
     }
 
     #[test]
