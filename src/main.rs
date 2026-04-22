@@ -6,9 +6,11 @@ mod filter;
 mod tray;
 
 use anyhow::{anyhow, Result};
+use calibrate::Calibrator;
 use filter::{Decision, Filter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,7 +20,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static FILTER: OnceLock<Mutex<Filter>> = OnceLock::new();
+static CALIBRATOR: OnceLock<Mutex<Calibrator>> = OnceLock::new();
 static DEBUG_LOG: AtomicBool = AtomicBool::new(false);
+static CALIBRATE_MODE: AtomicBool = AtomicBool::new(false);
 
 fn filter() -> &'static Mutex<Filter> {
     FILTER.get().expect("filter not initialized before hook fired")
@@ -38,10 +42,22 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
     let vk = info.vkCode;
     let time = info.time;
+    let event_kind = wparam.0 as u32;
+    let is_down = matches!(event_kind, WM_KEYDOWN | WM_SYSKEYDOWN);
+
+    // Calibration mode: record DOWN gaps, bypass the filter entirely.
+    if CALIBRATE_MODE.load(Ordering::Relaxed) {
+        if is_down {
+            if let Some(c) = CALIBRATOR.get() {
+                c.lock().unwrap().record_down(vk, time);
+            }
+        }
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
 
     let decision = {
         let mut f = filter().lock().unwrap();
-        match wparam.0 as u32 {
+        match event_kind {
             WM_KEYDOWN | WM_SYSKEYDOWN => f.on_key_down(vk, time),
             WM_KEYUP | WM_SYSKEYUP => f.on_key_up(vk, time),
             _ => Decision::Pass,
@@ -51,11 +67,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     match decision {
         Decision::Suppress => {
             if DEBUG_LOG.load(Ordering::Relaxed) {
-                let kind = match wparam.0 as u32 {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => "down",
-                    WM_KEYUP | WM_SYSKEYUP => "up",
-                    _ => "?",
-                };
+                let kind = if is_down { "down" } else { "up" };
                 println!("suppress {kind} vk=0x{vk:02X} t={time}");
             }
             LRESULT(1)
@@ -66,11 +78,26 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
 fn main() -> Result<()> {
     DEBUG_LOG.store(std::env::var_os("CHATTER_LOG").is_some(), Ordering::Relaxed);
+    let calibrate_mode = std::env::var_os("CHATTER_CALIBRATE").is_some();
+    CALIBRATE_MODE.store(calibrate_mode, Ordering::Relaxed);
 
     let cfg = config::Config::load()?;
     FILTER
         .set(Mutex::new(Filter::new(cfg)))
         .map_err(|_| anyhow!("filter already initialized"))?;
+
+    if calibrate_mode {
+        CALIBRATOR
+            .set(Mutex::new(Calibrator::new()))
+            .map_err(|_| anyhow!("calibrator already initialized"))?;
+        println!("[calibrate] mode active — filter bypassed, recording DOWN gaps");
+        println!("[calibrate] report prints every 5s; Ctrl+C when done");
+        std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_secs(5));
+            let snapshot = CALIBRATOR.get().unwrap().lock().unwrap().snapshot();
+            print!("{}", calibrate::format_report(&snapshot));
+        });
+    }
 
     unsafe {
         let hmod = GetModuleHandleW(None)?;
