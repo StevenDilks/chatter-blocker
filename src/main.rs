@@ -10,6 +10,7 @@ use anyhow::{anyhow, Result};
 use calibrate::Calibrator;
 use filter::{Decision, Filter};
 use notify::{RecursiveMode, Watcher};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -25,9 +26,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 static FILTER: OnceLock<Mutex<Filter>> = OnceLock::new();
-static CALIBRATOR: OnceLock<Mutex<Calibrator>> = OnceLock::new();
+static CALIBRATOR: Mutex<Option<Calibrator>> = Mutex::new(None);
 static DEBUG_LOG: AtomicBool = AtomicBool::new(false);
-static CALIBRATE_MODE: AtomicBool = AtomicBool::new(false);
+pub static CALIBRATE_MODE: AtomicBool = AtomicBool::new(false);
 pub static ENABLED: AtomicBool = AtomicBool::new(true);
 
 fn filter() -> &'static Mutex<Filter> {
@@ -41,6 +42,26 @@ pub fn total_suppressed() -> u64 {
         .and_then(|m| m.try_lock().ok())
         .map(|f| f.total_suppressed())
         .unwrap_or(0)
+}
+
+pub fn start_calibration() {
+    *CALIBRATOR.lock().unwrap() = Some(Calibrator::new());
+    CALIBRATE_MODE.store(true, Ordering::Relaxed);
+}
+
+/// Stops an in-progress calibration and writes `calibration.txt` next to
+/// `config.toml`. Returns the report path on success, or None if there was
+/// no active session or the file couldn't be written.
+pub fn stop_calibration() -> Option<PathBuf> {
+    CALIBRATE_MODE.store(false, Ordering::Relaxed);
+    let calibrator = CALIBRATOR.lock().unwrap().take()?;
+    let snapshot = calibrator.snapshot();
+    let report = calibrate::format_report(&snapshot);
+    let config_path = config::Config::path().ok()?;
+    let dir = config_path.parent()?;
+    let report_path = dir.join("calibration.txt");
+    std::fs::write(&report_path, report).ok()?;
+    Some(report_path)
 }
 
 fn spawn_config_watcher() {
@@ -91,22 +112,23 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
-    if !ENABLED.load(Ordering::Relaxed) {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    }
-
     let vk = info.vkCode;
     let time = info.time;
     let event_kind = wparam.0 as u32;
     let is_down = matches!(event_kind, WM_KEYDOWN | WM_SYSKEYDOWN);
 
-    // Calibration mode: record DOWN gaps, bypass the filter entirely.
+    // Calibration runs independently of ENABLED: once the user starts a
+    // session from the tray we record regardless of the filter's on/off state.
     if CALIBRATE_MODE.load(Ordering::Relaxed) {
         if is_down {
-            if let Some(c) = CALIBRATOR.get() {
-                c.lock().unwrap().record_down(vk, time);
+            if let Some(c) = CALIBRATOR.lock().unwrap().as_mut() {
+                c.record_down(vk, time);
             }
         }
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
+    if !ENABLED.load(Ordering::Relaxed) {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -160,14 +182,17 @@ fn main() -> Result<()> {
         .map_err(|_| anyhow!("filter already initialized"))?;
 
     if calibrate_mode {
-        CALIBRATOR
-            .set(Mutex::new(Calibrator::new()))
-            .map_err(|_| anyhow!("calibrator already initialized"))?;
+        *CALIBRATOR.lock().unwrap() = Some(Calibrator::new());
         eprintln!("[calibrate] mode active — filter bypassed, recording DOWN gaps");
         eprintln!("[calibrate] report prints every 5s; Ctrl+C when done");
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(5));
-            let snapshot = CALIBRATOR.get().unwrap().lock().unwrap().snapshot();
+            let snapshot = CALIBRATOR
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|c| c.snapshot())
+                .unwrap_or_default();
             eprint!("{}", calibrate::format_report(&snapshot));
         });
     } else {

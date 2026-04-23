@@ -1,6 +1,7 @@
 use crate::autostart;
 use crate::config::Config;
-use crate::ENABLED;
+use crate::{CALIBRATE_MODE, ENABLED};
+use std::path::Path;
 use anyhow::{anyhow, Result};
 use std::sync::atomic::Ordering;
 use windows::core::{w, PCWSTR};
@@ -25,6 +26,7 @@ const IDM_OPEN_CONFIG: usize = 1002;
 const IDM_QUIT: usize = 1003;
 const IDM_STATS: usize = 1004;
 const IDM_AUTOSTART: usize = 1005;
+const IDM_CALIBRATE: usize = 1006;
 const TRAY_UID: u32 = 1;
 const STATS_TIMER_ID: usize = 1;
 
@@ -165,6 +167,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 IDM_AUTOSTART => {
                     let _ = autostart::set(!autostart::is_enabled());
                 }
+                IDM_CALIBRATE => {
+                    if CALIBRATE_MODE.load(Ordering::Relaxed) {
+                        if let Some(path) = crate::stop_calibration() {
+                            unsafe { open_path(&path) };
+                        }
+                    } else {
+                        crate::start_calibration();
+                    }
+                }
                 IDM_QUIT => {
                     unsafe { remove_icon(hwnd) };
                     unsafe { PostQuitMessage(0) };
@@ -225,6 +236,12 @@ unsafe fn show_menu(hwnd: HWND) {
             w!("Start with Windows"),
         )
     };
+    let calibrate_label = if CALIBRATE_MODE.load(Ordering::Relaxed) {
+        w!("Stop calibration (open report)")
+    } else {
+        w!("Start calibration")
+    };
+    let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_CALIBRATE, calibrate_label) };
     let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };
     let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit")) };
 
@@ -263,7 +280,11 @@ unsafe fn remove_icon(hwnd: HWND) {
 unsafe fn open_config_folder() {
     let Ok(path) = Config::path() else { return };
     let Some(parent) = path.parent() else { return };
-    let wide: Vec<u16> = parent
+    unsafe { open_path(parent) };
+}
+
+unsafe fn open_path(path: &Path) {
+    let wide: Vec<u16> = path
         .to_string_lossy()
         .encode_utf16()
         .chain(std::iter::once(0))
