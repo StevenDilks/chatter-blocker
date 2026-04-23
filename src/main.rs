@@ -8,6 +8,7 @@ mod tray;
 use anyhow::{anyhow, Result};
 use calibrate::Calibrator;
 use filter::{Decision, Filter};
+use notify::{RecursiveMode, Watcher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -28,6 +29,42 @@ pub static ENABLED: AtomicBool = AtomicBool::new(true);
 
 fn filter() -> &'static Mutex<Filter> {
     FILTER.get().expect("filter not initialized before hook fired")
+}
+
+fn spawn_config_watcher() {
+    std::thread::spawn(|| {
+        let Ok(path) = config::Config::path() else {
+            return;
+        };
+        let Some(dir) = path.parent().map(|p| p.to_path_buf()) else {
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut watcher) = notify::recommended_watcher(tx) else {
+            return;
+        };
+        // Watching the parent dir (not the file) survives editor save-via-rename.
+        if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+        while let Ok(event) = rx.recv() {
+            let Ok(event) = event else { continue };
+            if !event.paths.iter().any(|p| p == &path) {
+                continue;
+            }
+            // Editors emit several events per save; coalesce them.
+            std::thread::sleep(Duration::from_millis(100));
+            while rx.try_recv().is_ok() {}
+            match config::Config::load() {
+                Ok(cfg) => {
+                    ENABLED.store(cfg.enabled, Ordering::Relaxed);
+                    filter().lock().unwrap().set_config(cfg);
+                    eprintln!("[config] reloaded");
+                }
+                Err(e) => eprintln!("[config] reload failed: {e}"),
+            }
+        }
+    });
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -110,6 +147,9 @@ fn main() -> Result<()> {
             let snapshot = CALIBRATOR.get().unwrap().lock().unwrap().snapshot();
             eprint!("{}", calibrate::format_report(&snapshot));
         });
+    } else {
+        eprintln!("[chatter-blocker] running; filter threshold from config; Ctrl+C to quit");
+        spawn_config_watcher();
     }
 
     unsafe {

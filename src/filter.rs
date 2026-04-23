@@ -28,6 +28,10 @@ impl Filter {
         }
     }
 
+    pub fn set_config(&mut self, cfg: Config) {
+        self.cfg = cfg;
+    }
+
     pub fn on_key_down(&mut self, vk: u32, time_ms: u32) -> Decision {
         let threshold = self.cfg.threshold(vk);
         let state = self.state.entry(vk).or_default();
