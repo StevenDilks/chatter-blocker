@@ -57,32 +57,66 @@ pub fn suggest_from_gaps(gaps: &[u32]) -> Option<u32> {
     Some(((max_low / BUCKET_MS) + 1) * BUCKET_MS)
 }
 
+enum Classification {
+    Chatter { threshold: u32, count_low: usize },
+    Suspicious { count_low: usize },
+    Clean,
+}
+
+fn classify(gaps: &[u32]) -> Classification {
+    let count_low = gaps.iter().filter(|&&g| g < CHATTER_CEILING_MS).count();
+    if count_low == 0 {
+        return Classification::Clean;
+    }
+    if let Some(threshold) = suggest_from_gaps(gaps) {
+        Classification::Chatter {
+            threshold,
+            count_low,
+        }
+    } else {
+        Classification::Suspicious { count_low }
+    }
+}
+
 pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
     if snapshot.is_empty() {
         return String::from("[calibrate] no data yet\n");
     }
     let mut keys: Vec<u32> = snapshot.keys().copied().collect();
     keys.sort();
-    let (chatter, clean): (Vec<u32>, Vec<u32>) = keys
-        .into_iter()
-        .filter(|vk| snapshot[vk].len() >= 3)
-        .partition(|vk| suggest_from_gaps(&snapshot[vk]).is_some());
+    keys.retain(|vk| snapshot[vk].len() >= 3);
+
+    let mut chatter = Vec::new();
+    let mut suspicious = Vec::new();
+    let mut clean = Vec::new();
+    for vk in &keys {
+        match classify(&snapshot[vk]) {
+            Classification::Chatter { .. } => chatter.push(*vk),
+            Classification::Suspicious { .. } => suspicious.push(*vk),
+            Classification::Clean => clean.push(*vk),
+        }
+    }
 
     let mut out = String::new();
     writeln!(
         out,
-        "[calibrate] {} keys sampled — {} chatter candidate{}, {} clean",
-        chatter.len() + clean.len(),
+        "[calibrate] {} keys sampled — {} chatter, {} suspicious, {} clean",
+        keys.len(),
         chatter.len(),
-        if chatter.len() == 1 { "" } else { "s" },
+        suspicious.len(),
         clean.len(),
     )
     .unwrap();
 
     for vk in &chatter {
         let gaps = &snapshot[vk];
-        let suggest = suggest_from_gaps(gaps).unwrap();
-        let count_low = gaps.iter().filter(|&&g| g < CHATTER_CEILING_MS).count();
+        let Classification::Chatter {
+            threshold,
+            count_low,
+        } = classify(gaps)
+        else {
+            continue;
+        };
         writeln!(
             out,
             "\n  vk 0x{:02X} ({}): n={} — CHATTER: {} gap{} <{}ms, suggest threshold {}ms",
@@ -92,10 +126,40 @@ pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
             count_low,
             if count_low == 1 { "" } else { "s" },
             CHATTER_CEILING_MS,
-            suggest,
+            threshold,
         )
         .unwrap();
         write_histogram(&mut out, gaps);
+    }
+
+    if !suspicious.is_empty() {
+        writeln!(
+            out,
+            "\n  suspicious (sub-{CHATTER_CEILING_MS}ms gaps but thin sample — type more to confirm):"
+        )
+        .unwrap();
+        for vk in &suspicious {
+            let gaps = &snapshot[vk];
+            let lows: Vec<u32> = gaps
+                .iter()
+                .copied()
+                .filter(|&g| g < CHATTER_CEILING_MS)
+                .collect();
+            let lows_str = lows
+                .iter()
+                .map(|g| format!("{g}ms"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                out,
+                "    vk 0x{:02X} ({}): n={}, low gaps: {}",
+                vk,
+                vk_name(*vk),
+                gaps.len(),
+                lows_str,
+            )
+            .unwrap();
+        }
     }
 
     if !clean.is_empty() {
