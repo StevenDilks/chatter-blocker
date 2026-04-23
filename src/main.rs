@@ -12,9 +12,11 @@ use notify::{RecursiveMode, Watcher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::core::w;
+use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
@@ -133,6 +135,17 @@ fn main() -> Result<()> {
     // is visible; silently fails (and no console appears) for Explorer launches.
     unsafe {
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
+    // Single-instance guard: double-clicking the exe from Explorer while the
+    // tray copy is already running would otherwise stack multiple icons and
+    // register duplicate LL hooks. The handle is intentionally left open for
+    // the life of the process; ExitProcess releases the name.
+    unsafe {
+        let _mutex = CreateMutexW(None, false, w!("Global\\ChatterBlockerSingleton"))?;
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            return Ok(());
+        }
     }
 
     DEBUG_LOG.store(std::env::var_os("CHATTER_LOG").is_some(), Ordering::Relaxed);
