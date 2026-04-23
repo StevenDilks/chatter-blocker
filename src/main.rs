@@ -1,4 +1,4 @@
-#![windows_subsystem = "console"]
+#![windows_subsystem = "windows"]
 
 mod calibrate;
 mod config;
@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
@@ -73,7 +74,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         Decision::Suppress => {
             if DEBUG_LOG.load(Ordering::Relaxed) {
                 let kind = if is_down { "down" } else { "up" };
-                println!("suppress {kind} vk=0x{vk:02X} t={time}");
+                eprintln!("suppress {kind} vk=0x{vk:02X} t={time}");
             }
             LRESULT(1)
         }
@@ -82,6 +83,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 }
 
 fn main() -> Result<()> {
+    // Attach to the parent's console if launched from a terminal so eprintln!
+    // is visible; silently fails (and no console appears) for Explorer launches.
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+
     DEBUG_LOG.store(std::env::var_os("CHATTER_LOG").is_some(), Ordering::Relaxed);
     let calibrate_mode = std::env::var_os("CHATTER_CALIBRATE").is_some();
     CALIBRATE_MODE.store(calibrate_mode, Ordering::Relaxed);
@@ -96,12 +103,12 @@ fn main() -> Result<()> {
         CALIBRATOR
             .set(Mutex::new(Calibrator::new()))
             .map_err(|_| anyhow!("calibrator already initialized"))?;
-        println!("[calibrate] mode active — filter bypassed, recording DOWN gaps");
-        println!("[calibrate] report prints every 5s; Ctrl+C when done");
+        eprintln!("[calibrate] mode active — filter bypassed, recording DOWN gaps");
+        eprintln!("[calibrate] report prints every 5s; Ctrl+C when done");
         std::thread::spawn(|| loop {
             std::thread::sleep(Duration::from_secs(5));
             let snapshot = CALIBRATOR.get().unwrap().lock().unwrap().snapshot();
-            print!("{}", calibrate::format_report(&snapshot));
+            eprint!("{}", calibrate::format_report(&snapshot));
         });
     }
 
