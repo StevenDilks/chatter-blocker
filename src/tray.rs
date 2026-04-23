@@ -12,17 +12,19 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    GetCursorPos, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-    TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO, MF_SEPARATOR, MF_STRING, SW_SHOW,
-    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
-    WM_NULL, WM_RBUTTONUP, WNDCLASSEXW,
+    GetCursorPos, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
+    TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    SW_SHOW, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU,
+    WM_DESTROY, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
 };
 
 const WM_TRAY: u32 = WM_APP + 1;
 const IDM_TOGGLE: usize = 1001;
 const IDM_OPEN_CONFIG: usize = 1002;
 const IDM_QUIT: usize = 1003;
+const IDM_STATS: usize = 1004;
 const TRAY_UID: u32 = 1;
+const STATS_TIMER_ID: usize = 1;
 
 pub fn install() -> Result<()> {
     unsafe {
@@ -53,6 +55,8 @@ pub fn install() -> Result<()> {
             None,
         )?;
         add_icon(hwnd)?;
+        // Refresh the tooltip's suppressed-count every 2s.
+        let _ = SetTimer(Some(hwnd), STATS_TIMER_ID, 2000, None);
     }
     Ok(())
 }
@@ -142,6 +146,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             LRESULT(0)
         }
+        WM_TIMER => {
+            if w.0 == STATS_TIMER_ID {
+                unsafe { update_tooltip(hwnd, ENABLED.load(Ordering::Relaxed)) };
+            }
+            LRESULT(0)
+        }
         WM_COMMAND => {
             let id = (w.0 & 0xFFFF) as usize;
             match id {
@@ -173,6 +183,20 @@ unsafe fn show_menu(hwnd: HWND) {
         Err(_) => return,
     };
     let enabled = ENABLED.load(Ordering::Relaxed);
+    let stats_label = format!("Suppressed: {}", crate::total_suppressed());
+    let stats_wide: Vec<u16> = stats_label
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let _ = unsafe {
+        AppendMenuW(
+            hmenu,
+            MF_STRING | MF_GRAYED,
+            IDM_STATS,
+            PCWSTR(stats_wide.as_ptr()),
+        )
+    };
+    let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };
     let toggle_label = if enabled { w!("Disable") } else { w!("Enable") };
     let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE, toggle_label) };
     let _ = unsafe {
@@ -239,11 +263,12 @@ unsafe fn open_config_folder() {
 }
 
 fn write_tip(buf: &mut [u16], enabled: bool) {
-    let s = if enabled {
-        "ChatterBlocker — on"
-    } else {
-        "ChatterBlocker — off"
-    };
+    let state = if enabled { "on" } else { "off" };
+    let s = format!(
+        "ChatterBlocker — {} | {} suppressed",
+        state,
+        crate::total_suppressed()
+    );
     let wide: Vec<u16> = s.encode_utf16().collect();
     let n = wide.len().min(buf.len() - 1);
     buf[..n].copy_from_slice(&wide[..n]);

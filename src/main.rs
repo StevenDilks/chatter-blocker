@@ -31,6 +31,15 @@ fn filter() -> &'static Mutex<Filter> {
     FILTER.get().expect("filter not initialized before hook fired")
 }
 
+pub fn total_suppressed() -> u64 {
+    // try_lock to avoid stalling the UI thread if the hook is mid-update.
+    FILTER
+        .get()
+        .and_then(|m| m.try_lock().ok())
+        .map(|f| f.total_suppressed())
+        .unwrap_or(0)
+}
+
 fn spawn_config_watcher() {
     std::thread::spawn(|| {
         let Ok(path) = config::Config::path() else {
