@@ -23,6 +23,7 @@ static FILTER: OnceLock<Mutex<Filter>> = OnceLock::new();
 static CALIBRATOR: OnceLock<Mutex<Calibrator>> = OnceLock::new();
 static DEBUG_LOG: AtomicBool = AtomicBool::new(false);
 static CALIBRATE_MODE: AtomicBool = AtomicBool::new(false);
+pub static ENABLED: AtomicBool = AtomicBool::new(true);
 
 fn filter() -> &'static Mutex<Filter> {
     FILTER.get().expect("filter not initialized before hook fired")
@@ -37,6 +38,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
     // Skip events injected by other processes (AutoHotkey, on-screen keyboards, SendInput).
     if info.flags.0 & LLKHF_INJECTED.0 != 0 {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    }
+
+    if !ENABLED.load(Ordering::Relaxed) {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -82,6 +87,7 @@ fn main() -> Result<()> {
     CALIBRATE_MODE.store(calibrate_mode, Ordering::Relaxed);
 
     let cfg = config::Config::load()?;
+    ENABLED.store(cfg.enabled, Ordering::Relaxed);
     FILTER
         .set(Mutex::new(Filter::new(cfg)))
         .map_err(|_| anyhow!("filter already initialized"))?;
@@ -103,6 +109,10 @@ fn main() -> Result<()> {
         let hmod = GetModuleHandleW(None)?;
         let hook: HHOOK =
             SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(hmod.into()), 0)?;
+
+        if !calibrate_mode {
+            tray::install()?;
+        }
 
         let mut msg = MSG::default();
         loop {
