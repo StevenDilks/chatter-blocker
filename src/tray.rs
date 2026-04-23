@@ -3,16 +3,17 @@ use crate::ENABLED;
 use anyhow::{anyhow, Result};
 use std::sync::atomic::Ordering;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
+use windows::Win32::Graphics::Gdi::{CreateBitmap, DeleteObject};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
     NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
-    LoadIconW, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-    TrackPopupMenu, HMENU, HWND_MESSAGE, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, SW_SHOW,
+    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    GetCursorPos, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
+    TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO, MF_SEPARATOR, MF_STRING, SW_SHOW,
     TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
     WM_NULL, WM_RBUTTONUP, WNDCLASSEXW,
 };
@@ -63,7 +64,7 @@ unsafe fn add_icon(hwnd: HWND) -> Result<()> {
         uID: TRAY_UID,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: unsafe { LoadIconW(None, IDI_APPLICATION)? },
+        hIcon: unsafe { make_icon()? },
         ..Default::default()
     };
     write_tip(&mut nid.szTip, ENABLED.load(Ordering::Relaxed));
@@ -71,6 +72,65 @@ unsafe fn add_icon(hwnd: HWND) -> Result<()> {
         return Err(anyhow!("Shell_NotifyIconW NIM_ADD failed"));
     }
     Ok(())
+}
+
+/// Build a 16x16 icon: a top-down view of a 'B' keycap.
+/// '.' transparent (rounded corners), '#' border, 'k' keycap face, 'B' letter.
+unsafe fn make_icon() -> Result<HICON> {
+    const W: i32 = 16;
+    const H: i32 = 16;
+    const PX: usize = (W * H) as usize;
+
+    const PATTERN: [&[u8; 16]; 16] = [
+        b".##############.",
+        b"#kkkkkkkkkkkkkk#",
+        b"#kkkkkkkkkkkkkk#",
+        b"#kkkkkkkkkkkkkk#",
+        b"#kkkkBBBBkkkkkk#",
+        b"#kkkkBkkkBkkkkk#",
+        b"#kkkkBkkkBkkkkk#",
+        b"#kkkkBBBBkkkkkk#",
+        b"#kkkkBkkkBkkkkk#",
+        b"#kkkkBkkkBkkkkk#",
+        b"#kkkkBkkkBkkkkk#",
+        b"#kkkkBBBBkkkkkk#",
+        b"#kkkkkkkkkkkkkk#",
+        b"#kkkkkkkkkkkkkk#",
+        b"#kkkkkkkkkkkkkk#",
+        b".##############.",
+    ];
+
+    let mut color = [0u8; PX * 4];
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let i = y * W as usize + x;
+            let (r, g, b, a) = match PATTERN[y][x] {
+                b'.' => (0, 0, 0, 0),
+                b'#' | b'B' => (40, 40, 40, 255),
+                b'k' => (235, 235, 235, 255),
+                _ => (255, 0, 255, 255),
+            };
+            color[i * 4] = b;
+            color[i * 4 + 1] = g;
+            color[i * 4 + 2] = r;
+            color[i * 4 + 3] = a;
+        }
+    }
+    let mask = [0u8; PX / 8];
+
+    let hbm_color = unsafe { CreateBitmap(W, H, 1, 32, Some(color.as_ptr() as *const _)) };
+    let hbm_mask = unsafe { CreateBitmap(W, H, 1, 1, Some(mask.as_ptr() as *const _)) };
+    let info = ICONINFO {
+        fIcon: TRUE,
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: hbm_mask,
+        hbmColor: hbm_color,
+    };
+    let hicon = unsafe { CreateIconIndirect(&info)? };
+    let _ = unsafe { DeleteObject(hbm_color.into()) };
+    let _ = unsafe { DeleteObject(hbm_mask.into()) };
+    Ok(hicon)
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
