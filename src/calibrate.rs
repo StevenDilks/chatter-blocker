@@ -12,10 +12,17 @@ const CHATTER_CEILING_MS: u32 = 50;
 /// Minimum sub-ceiling samples before we'll suggest a threshold.
 const MIN_CHATTER_COUNT: usize = 3;
 
+#[derive(Default, Clone)]
+pub struct Snapshot {
+    pub gaps: HashMap<u32, Vec<u32>>,
+    pub presses: HashMap<u32, u32>,
+}
+
 #[derive(Default)]
 pub struct Calibrator {
     last_down_ms: HashMap<u32, u32>,
     gaps: HashMap<u32, Vec<u32>>,
+    presses: HashMap<u32, u32>,
 }
 
 impl Calibrator {
@@ -24,6 +31,7 @@ impl Calibrator {
     }
 
     pub fn record_down(&mut self, vk: u32, time_ms: u32) {
+        *self.presses.entry(vk).or_insert(0) += 1;
         if let Some(prev) = self.last_down_ms.insert(vk, time_ms) {
             let gap = time_ms.saturating_sub(prev);
             if gap > 0 && gap < 2000 {
@@ -36,8 +44,11 @@ impl Calibrator {
         suggest_from_gaps(self.gaps.get(&vk)?)
     }
 
-    pub fn snapshot(&self) -> HashMap<u32, Vec<u32>> {
-        self.gaps.clone()
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            gaps: self.gaps.clone(),
+            presses: self.presses.clone(),
+        }
     }
 }
 
@@ -78,19 +89,29 @@ fn classify(gaps: &[u32]) -> Classification {
     }
 }
 
-pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
-    if snapshot.is_empty() {
+pub fn format_report(snapshot: &Snapshot) -> String {
+    if snapshot.presses.is_empty() {
         return String::from("[calibrate] no data yet\n");
     }
-    let mut keys: Vec<u32> = snapshot.keys().copied().collect();
+    let mut keys: Vec<u32> = snapshot.presses.keys().copied().collect();
     keys.sort();
-    keys.retain(|vk| snapshot[vk].len() >= 3);
+
+    let empty_gaps: Vec<u32> = Vec::new();
+    let gaps_for = |vk: u32| snapshot.gaps.get(&vk).unwrap_or(&empty_gaps);
 
     let mut chatter = Vec::new();
     let mut suspicious = Vec::new();
     let mut clean = Vec::new();
+    let mut insufficient = Vec::new();
     for vk in &keys {
-        match classify(&snapshot[vk]) {
+        let gaps = gaps_for(*vk);
+        // At least 3 same-key repeats inside the 2 s session window are
+        // needed to draw any conclusion — otherwise there's nothing to bin.
+        if gaps.len() < 3 {
+            insufficient.push(*vk);
+            continue;
+        }
+        match classify(gaps) {
             Classification::Chatter { .. } => chatter.push(*vk),
             Classification::Suspicious { .. } => suspicious.push(*vk),
             Classification::Clean => clean.push(*vk),
@@ -100,16 +121,17 @@ pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
     let mut out = String::new();
     writeln!(
         out,
-        "[calibrate] {} keys sampled — {} chatter, {} suspicious, {} clean",
+        "[calibrate] {} keys observed — {} chatter, {} suspicious, {} clean, {} insufficient data",
         keys.len(),
         chatter.len(),
         suspicious.len(),
         clean.len(),
+        insufficient.len(),
     )
     .unwrap();
 
     for vk in &chatter {
-        let gaps = &snapshot[vk];
+        let gaps = gaps_for(*vk);
         let Classification::Chatter {
             threshold,
             count_low,
@@ -139,14 +161,11 @@ pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
         )
         .unwrap();
         for vk in &suspicious {
-            let gaps = &snapshot[vk];
-            let lows: Vec<u32> = gaps
+            let gaps = gaps_for(*vk);
+            let lows_str = gaps
                 .iter()
                 .copied()
                 .filter(|&g| g < CHATTER_CEILING_MS)
-                .collect();
-            let lows_str = lows
-                .iter()
                 .map(|g| format!("{g}ms"))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -165,7 +184,7 @@ pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
     if !clean.is_empty() {
         writeln!(out, "\n  clean (no chatter signature):").unwrap();
         for vk in &clean {
-            let gaps = &snapshot[vk];
+            let gaps = gaps_for(*vk);
             let min = gaps.iter().copied().min().unwrap_or(0);
             writeln!(
                 out,
@@ -174,6 +193,29 @@ pub fn format_report(snapshot: &HashMap<u32, Vec<u32>>) -> String {
                 vk_name(*vk),
                 gaps.len(),
                 min,
+            )
+            .unwrap();
+        }
+    }
+
+    if !insufficient.is_empty() {
+        writeln!(
+            out,
+            "\n  insufficient data (<3 repeats within 2 s — press these keys faster or more times):"
+        )
+        .unwrap();
+        for vk in &insufficient {
+            let presses = snapshot.presses.get(vk).copied().unwrap_or(0);
+            let gaps_len = gaps_for(*vk).len();
+            writeln!(
+                out,
+                "    vk 0x{:02X} ({}): {} press{}, {} recorded gap{}",
+                vk,
+                vk_name(*vk),
+                presses,
+                if presses == 1 { "" } else { "es" },
+                gaps_len,
+                if gaps_len == 1 { "" } else { "s" },
             )
             .unwrap();
         }
