@@ -6,7 +6,20 @@ Installs a low-level keyboard hook, timestamps events per virtual-key, and swall
 
 ## Install
 
-Requires Rust and the MSVC toolchain (Visual Studio Build Tools).
+### Prerequisites
+
+**1. MSVC build tools.** Install the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and, in the installer, check **"Desktop development with C++"**. This pulls in the MSVC compiler, Windows SDK, and linker that Rust's `x86_64-pc-windows-msvc` target requires.
+
+**2. Rust.** Install via [rustup](https://rustup.rs/) — download and run `rustup-init.exe`. Accept the default `stable-x86_64-pc-windows-msvc` toolchain. Open a new terminal after install so `cargo` is on `PATH`.
+
+Verify:
+
+```
+rustc --version
+cargo --version
+```
+
+### Build
 
 ```
 git clone https://github.com/StevenDilks/chatter-blocker
