@@ -1,3 +1,4 @@
+use crate::autostart;
 use crate::config::Config;
 use crate::ENABLED;
 use anyhow::{anyhow, Result};
@@ -13,9 +14,9 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
     GetCursorPos, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, SetTimer,
-    TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    SW_SHOW, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_CONTEXTMENU,
-    WM_DESTROY, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
+    TrackPopupMenu, HICON, HMENU, HWND_MESSAGE, ICONINFO, MF_CHECKED, MF_GRAYED, MF_SEPARATOR,
+    MF_STRING, MF_UNCHECKED, SW_SHOW, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP,
+    WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW,
 };
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -23,6 +24,7 @@ const IDM_TOGGLE: usize = 1001;
 const IDM_OPEN_CONFIG: usize = 1002;
 const IDM_QUIT: usize = 1003;
 const IDM_STATS: usize = 1004;
+const IDM_AUTOSTART: usize = 1005;
 const TRAY_UID: u32 = 1;
 const STATS_TIMER_ID: usize = 1;
 
@@ -160,6 +162,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                     unsafe { update_tooltip(hwnd, !was) };
                 }
                 IDM_OPEN_CONFIG => unsafe { open_config_folder() },
+                IDM_AUTOSTART => {
+                    let _ = autostart::set(!autostart::is_enabled());
+                }
                 IDM_QUIT => {
                     unsafe { remove_icon(hwnd) };
                     unsafe { PostQuitMessage(0) };
@@ -205,6 +210,19 @@ unsafe fn show_menu(hwnd: HWND) {
             MF_STRING,
             IDM_OPEN_CONFIG,
             w!("Open config folder"),
+        )
+    };
+    let autostart_flags = if autostart::is_enabled() {
+        MF_STRING | MF_CHECKED
+    } else {
+        MF_STRING | MF_UNCHECKED
+    };
+    let _ = unsafe {
+        AppendMenuW(
+            hmenu,
+            autostart_flags,
+            IDM_AUTOSTART,
+            w!("Start with Windows"),
         )
     };
     let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };

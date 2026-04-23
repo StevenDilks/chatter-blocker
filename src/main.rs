@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod autostart;
 mod calibrate;
 mod config;
 mod filter;
