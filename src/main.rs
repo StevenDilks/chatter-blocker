@@ -49,19 +49,49 @@ pub fn start_calibration() {
     CALIBRATE_MODE.store(true, Ordering::Relaxed);
 }
 
-/// Stops an in-progress calibration and writes `calibration.txt` next to
-/// `config.toml`. Returns the report path on success, or None if there was
-/// no active session or the file couldn't be written.
-pub fn stop_calibration() -> Option<PathBuf> {
+/// Stops an in-progress calibration and hands back the final snapshot.
+/// Returns None if there was no active session.
+pub fn stop_calibration() -> Option<calibrate::Snapshot> {
     CALIBRATE_MODE.store(false, Ordering::Relaxed);
     let calibrator = CALIBRATOR.lock().unwrap().take()?;
-    let snapshot = calibrator.snapshot();
-    let report = calibrate::format_report(&snapshot);
+    Some(calibrator.snapshot())
+}
+
+/// Writes `calibration.txt` next to `config.toml`. If `prelude` is Some, it's
+/// emitted before the histogram report — used to document what was applied
+/// to the config on the apply path.
+pub fn write_calibration_report(
+    snapshot: &calibrate::Snapshot,
+    prelude: Option<&str>,
+) -> Option<PathBuf> {
+    let mut body = String::new();
+    if let Some(p) = prelude {
+        body.push_str(p);
+        body.push_str("\n\n");
+    }
+    body.push_str(&calibrate::format_report(snapshot));
     let config_path = config::Config::path().ok()?;
     let dir = config_path.parent()?;
     let report_path = dir.join("calibration.txt");
-    std::fs::write(&report_path, report).ok()?;
+    std::fs::write(&report_path, body).ok()?;
     Some(report_path)
+}
+
+/// Merges chatter-classified suggestions into config.toml. Existing entries
+/// for unrelated keys are preserved. Returns the applied pairs on success.
+pub fn apply_calibration_to_config(
+    snapshot: &calibrate::Snapshot,
+) -> Result<Vec<(u32, u32)>> {
+    let suggestions = calibrate::chatter_suggestions(snapshot);
+    if suggestions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut cfg = config::Config::load()?;
+    for &(vk, threshold) in &suggestions {
+        cfg.per_key_threshold_ms.insert(vk, threshold);
+    }
+    cfg.save()?;
+    Ok(suggestions)
 }
 
 fn spawn_config_watcher() {

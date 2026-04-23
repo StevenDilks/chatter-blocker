@@ -89,6 +89,27 @@ fn classify(gaps: &[u32]) -> Classification {
     }
 }
 
+/// Per-vk threshold suggestions for every key that classified as Chatter.
+/// Suspicious and clean keys are omitted — only high-confidence chatter
+/// signatures should auto-modify the user's config.
+pub fn chatter_suggestions(snapshot: &Snapshot) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = snapshot
+        .gaps
+        .iter()
+        .filter_map(|(vk, gaps)| {
+            if gaps.len() < 3 {
+                return None;
+            }
+            match classify(gaps) {
+                Classification::Chatter { threshold, .. } => Some((*vk, threshold)),
+                _ => None,
+            }
+        })
+        .collect();
+    out.sort_by_key(|&(vk, _)| vk);
+    out
+}
+
 pub fn format_report(snapshot: &Snapshot) -> String {
     if snapshot.presses.is_empty() {
         return String::from("[calibrate] no data yet\n");
@@ -345,5 +366,27 @@ mod tests {
         // not enough to declare chatter.
         let gaps: Vec<u32> = vec![18, 180, 200, 210];
         assert!(suggest_from_gaps(&gaps).is_none());
+    }
+
+    #[test]
+    fn chatter_suggestions_returns_only_chatter_class() {
+        let mut snap = Snapshot::default();
+        // Chatter: 3+ sub-50ms gaps.
+        snap.gaps.insert(0x42, vec![15, 18, 20, 150, 180]);
+        snap.presses.insert(0x42, 6);
+        // Suspicious: one sub-50ms gap.
+        snap.gaps.insert(0x43, vec![18, 180, 200, 210]);
+        snap.presses.insert(0x43, 5);
+        // Clean: no sub-50ms gaps.
+        snap.gaps.insert(0x44, vec![150, 180, 200]);
+        snap.presses.insert(0x44, 4);
+        // Insufficient: only 2 gaps.
+        snap.gaps.insert(0x45, vec![10, 15]);
+        snap.presses.insert(0x45, 3);
+
+        let sugg = chatter_suggestions(&snap);
+        assert_eq!(sugg.len(), 1);
+        assert_eq!(sugg[0].0, 0x42);
+        assert!(sugg[0].1 >= 20 && sugg[0].1 <= 50);
     }
 }

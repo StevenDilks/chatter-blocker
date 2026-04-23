@@ -27,6 +27,7 @@ const IDM_QUIT: usize = 1003;
 const IDM_STATS: usize = 1004;
 const IDM_AUTOSTART: usize = 1005;
 const IDM_CALIBRATE: usize = 1006;
+const IDM_CALIBRATE_APPLY: usize = 1007;
 const TRAY_UID: u32 = 1;
 const STATS_TIMER_ID: usize = 1;
 
@@ -169,11 +170,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 }
                 IDM_CALIBRATE => {
                     if CALIBRATE_MODE.load(Ordering::Relaxed) {
-                        if let Some(path) = crate::stop_calibration() {
-                            unsafe { open_path(&path) };
+                        if let Some(snap) = crate::stop_calibration() {
+                            if let Some(path) = crate::write_calibration_report(&snap, None) {
+                                unsafe { open_path(&path) };
+                            }
                         }
                     } else {
                         crate::start_calibration();
+                    }
+                }
+                IDM_CALIBRATE_APPLY => {
+                    if let Some(snap) = crate::stop_calibration() {
+                        let prelude = match crate::apply_calibration_to_config(&snap) {
+                            Ok(applied) if applied.is_empty() => {
+                                "[calibrate] no chatter candidates; config unchanged".to_string()
+                            }
+                            Ok(applied) => {
+                                let mut s = format!(
+                                    "[calibrate] applied {} threshold{} to config.toml:",
+                                    applied.len(),
+                                    if applied.len() == 1 { "" } else { "s" },
+                                );
+                                for (vk, t) in &applied {
+                                    s.push_str(&format!("\n  vk 0x{:02X}: {}ms", vk, t));
+                                }
+                                s
+                            }
+                            Err(e) => format!("[calibrate] failed to update config: {e}"),
+                        };
+                        if let Some(path) =
+                            crate::write_calibration_report(&snap, Some(&prelude))
+                        {
+                            unsafe { open_path(&path) };
+                        }
                     }
                 }
                 IDM_QUIT => {
@@ -236,12 +265,26 @@ unsafe fn show_menu(hwnd: HWND) {
             w!("Start with Windows"),
         )
     };
-    let calibrate_label = if CALIBRATE_MODE.load(Ordering::Relaxed) {
-        w!("Stop calibration (open report)")
+    if CALIBRATE_MODE.load(Ordering::Relaxed) {
+        let _ = unsafe {
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                IDM_CALIBRATE,
+                w!("Stop calibration (view report)"),
+            )
+        };
+        let _ = unsafe {
+            AppendMenuW(
+                hmenu,
+                MF_STRING,
+                IDM_CALIBRATE_APPLY,
+                w!("Stop calibration && apply to config"),
+            )
+        };
     } else {
-        w!("Start calibration")
-    };
-    let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_CALIBRATE, calibrate_label) };
+        let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_CALIBRATE, w!("Start calibration")) };
+    }
     let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };
     let _ = unsafe { AppendMenuW(hmenu, MF_STRING, IDM_QUIT, w!("Quit")) };
 
